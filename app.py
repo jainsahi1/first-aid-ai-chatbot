@@ -1,57 +1,74 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, session
 from openai import OpenAI
 import os
+from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "dev_secret")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///data.db'
+db = SQLAlchemy(app)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True)
+    password = db.Column(db.String(100))
+
+class Chat(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer)
+    message = db.Column(db.Text)
+    response = db.Column(db.Text)
+
+@app.before_request
+def create_tables():
+    db.create_all()
+
 @app.route("/")
 def home():
+    if "user" not in session:
+        return redirect("/login")
     return render_template("index.html")
+
+@app.route("/login", methods=["GET","POST"])
+def login():
+    if request.method == "POST":
+        user = User.query.filter_by(username=request.form["username"]).first()
+        if user and user.password == request.form["password"]:
+            session["user"] = user.id
+            return redirect("/")
+    return render_template("login.html")
+
+@app.route("/register", methods=["GET","POST"])
+def register():
+    if request.method == "POST":
+        new_user = User(username=request.form["username"], password=request.form["password"])
+        db.session.add(new_user)
+        db.session.commit()
+        return redirect("/login")
+    return render_template("register.html")
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.json
-    user_message = data["message"]
-    lang = data.get("lang", "en")
-
-    system_prompt = "You are a first aid assistant. Give short, safe advice for minor injuries only."
-
-    if lang == "hi":
-        system_prompt += " Reply in Hindi."
+    user_message = request.json["message"]
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": "You are a safe first aid assistant."},
             {"role": "user", "content": user_message}
         ]
     )
 
-    return jsonify({"reply": response.choices[0].message.content})
+    reply = response.choices[0].message.content
 
+    chat = Chat(user_id=session["user"], message=user_message, response=reply)
+    db.session.add(chat)
+    db.session.commit()
 
-@app.route("/analyze-image", methods=["POST"])
-def analyze_image():
-    image = request.json["image"]
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Identify injury and give first aid advice."},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Analyze this injury"},
-                    {"type": "image_url", "image_url": {"url": image}}
-                ]
-            }
-        ]
-    )
-
-    return jsonify({"reply": response.choices[0].message.content})
-
+    return jsonify({"reply": reply})
 
 if __name__ == "__main__":
     app.run()
